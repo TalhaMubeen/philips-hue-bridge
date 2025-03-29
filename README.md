@@ -48,6 +48,8 @@ This project implements a Philips Hue-compatible LED controller using the Seeed 
    - Enable EEPROM
    - Set Flash Size to 4MB
    - Set Partition Scheme to "Huge APP"
+   - Set CPU Frequency to 160MHz
+   - Set Upload Speed to 921600
 3. Connect the WS2812 LEDs to GPIO 2
 4. Connect the capacitive touch sensor to GPIO 4
 5. Connect battery monitoring circuit to A0 (optional)
@@ -57,6 +59,34 @@ This project implements a Philips Hue-compatible LED controller using the Seeed 
    - Configure your WiFi credentials in the web portal
    - Wait for automatic connection to your network
 8. Connect to the Philips Hue Bridge using the Hue app
+
+## Hue Bridge Setup
+
+1. First-time Connection:
+   - Power on your Hue Bridge
+   - Press the link button on your Hue Bridge
+   - Power on the XIAO LED Controller
+   - The controller will automatically discover and connect to your Hue Bridge
+   - The link button must be pressed within 30 seconds of powering on the controller
+
+2. Authentication Process:
+   - The controller will automatically discover your Hue Bridge on the network
+   - It will register itself as a new device
+   - The generated username will be stored in EEPROM
+   - No manual configuration is required
+
+3. Troubleshooting Hue Connection:
+   - If the controller shows "Press link button on Hue Bridge":
+     1. Press the link button on your Hue Bridge
+     2. Wait for the controller to authenticate
+   - If the controller shows "Could not discover Hue Bridge":
+     1. Ensure the Hue Bridge is powered on
+     2. Check if the controller and bridge are on the same network
+     3. Try power cycling both devices
+   - If authentication fails:
+     1. Power cycle both devices
+     2. Press the link button on the Hue Bridge
+     3. Wait for the controller to reconnect
 
 ## Pin Configuration
 

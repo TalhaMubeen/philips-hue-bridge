@@ -8,10 +8,15 @@
 
 // Philips Hue Bridge Configuration
 #define HUE_BRIDGE_IP "192.168.1.2"      // Replace with your Hue Bridge IP
-#define HUE_USERNAME "newdeveloper"       // Default username for first-time setup
 #define HUE_BRIDGE_PORT 80               // Default Hue Bridge port
 #define HUE_RETRY_COUNT 3                // Number of connection retries
 #define HUE_RETRY_DELAY 2000             // Delay between retries in ms
+#define HUE_DEVICE_TYPE "XIAO_Hue_Light" // Device type for Hue Bridge registration
+#define HUE_DEVICE_NAME "XIAO LED Controller" // Device name for Hue Bridge
+#define HUE_MAX_USERNAME_LENGTH 32       // Maximum length for Hue username
+#define HUE_MAX_BRIDGE_IP_LENGTH 16      // Maximum length for Hue Bridge IP
+#define HUE_DISCOVERY_URL "https://discovery.meethue.com" // Hue Bridge discovery URL
+#define HUE_AUTH_TIMEOUT 30000           // Timeout for authentication in ms (30 seconds)
 
 // LED Configuration
 #define LED_PIN 2                        // GPIO pin for WS2812 LEDs

@@ -6,6 +6,7 @@
 #include <EEPROM.h>
 #include <WiFiManager.h>
 #include <ESP32Ping.h>
+#include <HTTPClient.h>
 #include "config.h"
 
 // LED Configuration
@@ -26,6 +27,7 @@
 CRGB leds[NUM_LEDS];
 AsyncWebServer server(80);
 Touch touch(TOUCH_PIN);
+HTTPClient http;
 
 // Pattern States
 uint8_t currentPattern = 0;
@@ -35,14 +37,23 @@ unsigned long lastTouchTime = 0;
 unsigned long touchStartTime = 0;
 bool isLongPress = false;
 
+// Hue Bridge Authentication
+bool isHueAuthenticated = false;
+String hueUsername = "";
+String hueBridgeIP = "";
+unsigned long lastHueAuthCheck = 0;
+unsigned long hueAuthStartTime = 0;
+bool hueAuthInProgress = false;
+
 // Persistent Storage Structure
 struct Settings {
     uint8_t currentPattern;
     uint8_t currentBrightness;
     uint8_t currentColor;
     bool isOn;
-    char hueUsername[32];
-    char hueBridgeIP[16];
+    char hueUsername[HUE_MAX_USERNAME_LENGTH];
+    char hueBridgeIP[HUE_MAX_BRIDGE_IP_LENGTH];
+    bool isHueAuthenticated;
 };
 
 Settings settings;
@@ -155,18 +166,99 @@ void handleTouch() {
     }
 }
 
-// Philips Hue API Endpoints
+// Hue Bridge API Authentication
+bool authenticateHueBridge() {
+    if (hueAuthInProgress) {
+        // Check if authentication timeout has occurred
+        if (millis() - hueAuthStartTime > HUE_AUTH_TIMEOUT) {
+            hueAuthInProgress = false;
+            isError = true;
+            errorMessage = "Hue Bridge authentication timeout";
+            return false;
+        }
+        return false;
+    }
+
+    // First, try to get the bridge IP if not set
+    if (hueBridgeIP.length() == 0) {
+        http.begin(HUE_DISCOVERY_URL);
+        int httpCode = http.GET();
+        
+        if (httpCode == HTTP_CODE_OK) {
+            String payload = http.getString();
+            DynamicJsonDocument doc(1024);
+            DeserializationError error = deserializeJson(doc, payload);
+            
+            if (!error && doc.size() > 0) {
+                hueBridgeIP = doc[0]["internalipaddress"].as<String>();
+            }
+        }
+        http.end();
+    }
+    
+    if (hueBridgeIP.length() == 0) {
+        isError = true;
+        errorMessage = "Could not discover Hue Bridge";
+        return false;
+    }
+    
+    // Try to register the device
+    String url = "http://" + hueBridgeIP + "/api";
+    String payload = "{\"devicetype\":\"" + String(HUE_DEVICE_TYPE) + "\",\"username\":\"" + hueUsername + "\"}";
+    
+    http.begin(url);
+    http.addHeader("Content-Type", "application/json");
+    int httpCode = http.POST(payload);
+    
+    if (httpCode == HTTP_CODE_OK) {
+        String response = http.getString();
+        DynamicJsonDocument doc(1024);
+        DeserializationError error = deserializeJson(doc, response);
+        
+        if (!error && doc.size() > 0) {
+            if (doc[0].containsKey("success")) {
+                hueUsername = doc[0]["success"]["username"].as<String>();
+                isHueAuthenticated = true;
+                hueAuthInProgress = false;
+                return true;
+            } else if (doc[0].containsKey("error")) {
+                if (doc[0]["error"]["type"] == 101) {
+                    // Link button not pressed
+                    isError = true;
+                    errorMessage = "Press link button on Hue Bridge";
+                    return false;
+                }
+            }
+        }
+    }
+    
+    isError = true;
+    errorMessage = "Failed to authenticate with Hue Bridge";
+    return false;
+}
+
+// Update Hue API Endpoints
 void setupHueEndpoints() {
     server.on("/api/newdeveloper/lights", HTTP_GET, [](AsyncWebServerRequest *request){
+        if (!isHueAuthenticated) {
+            request->send(401, "application/json", "{\"error\":{\"type\":1,\"address\":\"/\",\"description\":\"Unauthorized\"}}");
+            return;
+        }
+        
         String response = "{\"1\":{\"state\":{\"on\":true,\"bri\":" + String(currentBrightness) + 
                          ",\"hue\":" + String(currentColor * 182) + 
-                         ",\"sat\":255,\"effect\":\"none\",\"xy\":[0.5,0.5],\"ct\":500,\"alert\":\"none\",\"colormode\":\"hs\",\"reachable\":true},\"type\":\"extended color light\",\"name\":\"XIAO LED Controller\",\"modelid\":\"LCT007\",\"manufacturername\":\"Philips\",\"uniqueid\":\"00:17:88:01:00:d4:12:08-0b\",\"swversion\":\"66009461\",\"pointsymbol\":{\"1\":\"none\",\"2\":\"none\",\"3\":\"none\",\"4\":\"none\",\"5\":\"none\",\"6\":\"none\",\"7\":\"none\",\"8\":\"none\"}}}";
+                         ",\"sat\":255,\"effect\":\"none\",\"xy\":[0.5,0.5],\"ct\":500,\"alert\":\"none\",\"colormode\":\"hs\",\"reachable\":true},\"type\":\"extended color light\",\"name\":\"" + String(HUE_DEVICE_NAME) + "\",\"modelid\":\"LCT007\",\"manufacturername\":\"Philips\",\"uniqueid\":\"00:17:88:01:00:d4:12:08-0b\",\"swversion\":\"66009461\",\"pointsymbol\":{\"1\":\"none\",\"2\":\"none\",\"3\":\"none\",\"4\":\"none\",\"5\":\"none\",\"6\":\"none\",\"7\":\"none\",\"8\":\"none\"}}}";
         request->send(200, "application/json", response);
     });
 
     server.on("/api/newdeveloper/lights/1/state", HTTP_PUT, [](AsyncWebServerRequest *request){
+        if (!isHueAuthenticated) {
+            request->send(401, "application/json", "{\"error\":{\"type\":1,\"address\":\"/\",\"description\":\"Unauthorized\"}}");
+            return;
+        }
+        
         if(request->hasParam("on", true)) {
-            // Handle power state
+            settings.isOn = request->getParam("on", true)->value() == "true";
         }
         if(request->hasParam("bri", true)) {
             currentBrightness = request->getParam("bri", true)->value().toInt();
@@ -192,6 +284,11 @@ void loadSettings() {
     currentPattern = settings.currentPattern;
     currentBrightness = settings.currentBrightness;
     currentColor = settings.currentColor;
+    
+    // Load Hue credentials
+    hueUsername = String(settings.hueUsername);
+    hueBridgeIP = String(settings.hueBridgeIP);
+    isHueAuthenticated = settings.isHueAuthenticated;
 }
 
 // Save Settings to EEPROM
@@ -199,6 +296,11 @@ void saveSettings() {
     settings.currentPattern = currentPattern;
     settings.currentBrightness = currentBrightness;
     settings.currentColor = currentColor;
+    settings.isHueAuthenticated = isHueAuthenticated;
+    
+    // Save Hue credentials
+    strncpy(settings.hueUsername, hueUsername.c_str(), HUE_MAX_USERNAME_LENGTH - 1);
+    strncpy(settings.hueBridgeIP, hueBridgeIP.c_str(), HUE_MAX_BRIDGE_IP_LENGTH - 1);
     
     EEPROM.begin(EEPROM_SIZE);
     EEPROM.put(0, settings);
@@ -341,6 +443,12 @@ void setup() {
     // Setup WiFi
     setupWiFi();
     
+    // Start Hue Bridge authentication
+    if (!isHueAuthenticated) {
+        hueAuthInProgress = true;
+        hueAuthStartTime = millis();
+    }
+    
     // Setup web server
     setupHueEndpoints();
     server.begin();
@@ -363,6 +471,14 @@ void loop() {
     
     // Handle touch input
     handleTouch();
+    
+    // Check Hue Bridge authentication
+    if (!isHueAuthenticated && currentMillis - lastHueAuthCheck >= 5000) {
+        if (authenticateHueBridge()) {
+            saveSettings();
+        }
+        lastHueAuthCheck = currentMillis;
+    }
     
     // Update pattern if interval has elapsed
     if (currentMillis - lastPatternUpdate >= PATTERN_UPDATE_INTERVAL) {
