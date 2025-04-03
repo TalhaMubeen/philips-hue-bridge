@@ -1,49 +1,33 @@
-#include <FastLED.h>
-#include <ESPAsyncWebServer.h>
-#include <ESPAsyncTCP.h>
-#include <ArduinoJson.h>
-#include <ESP32Touch.h>
-#include <EEPROM.h>
-#include <WiFiManager.h>
-#include <ESP32Ping.h>
-#include <HTTPClient.h>
 #include "config.h"
-
-// LED Configuration
-#define LED_PIN     2
-#define NUM_LEDS    10
-#define LED_TYPE    WS2812
-#define COLOR_ORDER GRB
-
-// Touch Configuration
-#define TOUCH_PIN   4
-#define TOUCH_THRESHOLD 40
-
-// Pattern Configuration
-#define NUM_PATTERNS 6
-#define BRIGHTNESS_STEPS 5
+#include <FastLED.h>
+#include <WiFiManager.h>
+#include <EEPROM.h>
+#include <HTTPClient.h>
+#include <ArduinoJson.h>
+#define ASYNCWEBSERVER_REGEX
+#include <ESPAsyncWebServer.h>
 
 // Global Variables
 CRGB leds[NUM_LEDS];
-AsyncWebServer server(80);
-Touch touch(TOUCH_PIN);
+AsyncWebServer server(HUE_BRIDGE_PORT);
 HTTPClient http;
 
 // Pattern States
 uint8_t currentPattern = 0;
-uint8_t currentBrightness = 128;
+uint8_t currentBrightness = DEFAULT_BRIGHTNESS;
 uint8_t currentColor = 0;
-unsigned long lastTouchTime = 0;
-unsigned long touchStartTime = 0;
+unsigned long lastButtonTime = 0;
+unsigned long buttonStartTime = 0;
 bool isLongPress = false;
+
+// Button Variables
+bool lastButtonState = false;
+bool currentButtonState = false;
 
 // Hue Bridge Authentication
 bool isHueAuthenticated = false;
-String hueUsername = "";
-String hueBridgeIP = "";
-unsigned long lastHueAuthCheck = 0;
-unsigned long hueAuthStartTime = 0;
-bool hueAuthInProgress = false;
+String hueUsername = HUE_DEVICE_TYPE;
+String hueBridgeIP = HUE_BRIDGE_IP;
 
 // Persistent Storage Structure
 struct Settings {
@@ -51,37 +35,14 @@ struct Settings {
     uint8_t currentBrightness;
     uint8_t currentColor;
     bool isOn;
-    char hueUsername[HUE_MAX_USERNAME_LENGTH];
-    char hueBridgeIP[HUE_MAX_BRIDGE_IP_LENGTH];
-    bool isHueAuthenticated;
+    char hueBridgeIP[HUE_MAX_BRIDGE_IP_LENGTH];  // Store IP persistently
 };
-
 Settings settings;
 const int EEPROM_SIZE = sizeof(Settings);
 
-// Power Management
-#define BATTERY_PIN A0
-#define BATTERY_CHECK_INTERVAL 300000  // 5 minutes
+// Battery and Timing
 unsigned long lastBatteryCheck = 0;
-uint8_t batteryLevel = 0;
-
-#define BATTERY_SAMPLES 10
-uint16_t batteryReadings[BATTERY_SAMPLES];
-uint8_t batteryIndex = 0;
-
-// Watchdog Timer
-hw_timer_t *watchdogTimer = NULL;
-
-// Error Handling
-bool isError = false;
-String errorMessage = "";
-
-// Timing Management
 unsigned long lastPatternUpdate = 0;
-const unsigned long PATTERN_UPDATE_INTERVAL = 20;
-unsigned long lastErrorBlink = 0;
-const unsigned long ERROR_BLINK_INTERVAL = 1000;
-bool errorLedState = false;
 
 // Pattern Functions
 void solidColor() {
@@ -90,7 +51,7 @@ void solidColor() {
 
 void rainbowWave() {
     static uint8_t hue = 0;
-    for(int i = 0; i < NUM_LEDS; i++) {
+    for (int i = 0; i < NUM_LEDS; i++) {
         leds[i] = CHSV(hue + (i * 256 / NUM_LEDS), 255, currentBrightness);
     }
     hue++;
@@ -99,10 +60,8 @@ void rainbowWave() {
 void breathingEffect() {
     static uint8_t brightness = 0;
     static int8_t direction = 1;
-    
     brightness += direction;
-    if(brightness == 0 || brightness == currentBrightness) direction *= -1;
-    
+    if (brightness == 0 || brightness == currentBrightness) direction *= -1;
     fill_solid(leds, NUM_LEDS, CHSV(currentColor, 255, brightness));
 }
 
@@ -115,10 +74,8 @@ void chaseEffect() {
 
 void twinkleEffect() {
     static uint8_t twinkle[NUM_LEDS];
-    for(int i = 0; i < NUM_LEDS; i++) {
-        if(random8() < 128) {
-            twinkle[i] = random8();
-        }
+    for (int i = 0; i < NUM_LEDS; i++) {
+        if (random8() < 128) twinkle[i] = random8();
         leds[i] = CHSV(currentColor, 255, twinkle[i]);
     }
 }
@@ -129,179 +86,160 @@ void colorCycle() {
     hue++;
 }
 
-// Pattern Array
+// Define PatternFunction type
 typedef void (*PatternFunction)();
-PatternFunction patterns[] = {
-    solidColor,
-    rainbowWave,
-    breathingEffect,
-    chaseEffect,
-    twinkleEffect,
-    colorCycle
-};
+PatternFunction patterns[] = {solidColor, rainbowWave, breathingEffect, chaseEffect, twinkleEffect, colorCycle};
 
-// Touch Handling
-void handleTouch() {
-    if(touch.read() < TOUCH_THRESHOLD) {
-        if(!isLongPress) {
-            unsigned long touchDuration = millis() - touchStartTime;
-            if(touchDuration > 1000) { // Long press
-                isLongPress = true;
-                currentColor = (currentColor + 32) % 256;
-            }
-        }
-    } else {
-        if(isLongPress) {
-            isLongPress = false;
-        } else {
-            unsigned long currentTime = millis();
-            if(currentTime - lastTouchTime < 300) { // Double tap
-                currentBrightness = (currentBrightness + 51) % 256;
-            } else { // Single tap
-                currentPattern = (currentPattern + 1) % NUM_PATTERNS;
-            }
-            lastTouchTime = currentTime;
-        }
-        touchStartTime = millis();
+// Button Functions
+void handleButton() {
+  static unsigned long lastDebounceTime = 0;
+  static bool lastRawButtonState = false;
+  bool rawButtonState = digitalRead(BUTTON_PIN);
+  
+  // Debounce the button reading
+  if (rawButtonState != lastRawButtonState) {
+    lastDebounceTime = millis();
+  }
+  
+  if ((millis() - lastDebounceTime) > BUTTON_DEBOUNCE_TIME) {
+    // Button state is stable, update current state
+    currentButtonState = !rawButtonState;  // Invert because of pull-up resistor
+    
+    if (currentButtonState && !lastButtonState) {
+      // Button press detected
+      unsigned long currentTime = millis();
+      
+      if (currentTime - lastButtonTime < BUTTON_DOUBLE_TAP_DURATION) {
+        // Double tap - brightness change
+        currentBrightness = (currentBrightness + (MAX_BRIGHTNESS / BRIGHTNESS_STEPS)) % (MAX_BRIGHTNESS + 1);
+        FastLED.setBrightness(currentBrightness);
+        saveSettings();
+        Serial.println("Double tap - brightness changed");
+      } else {
+        // Single tap - pattern change
+        currentPattern = (currentPattern + 1) % NUM_PATTERNS;
+        saveSettings();
+        Serial.println("Single tap - pattern changed");
+      }
+      lastButtonTime = currentTime;
+      buttonStartTime = currentTime;
+    } 
+    else if (currentButtonState && (millis() - buttonStartTime > BUTTON_LONG_PRESS_DURATION)) {
+      // Long press - color cycle
+      if (!isLongPress) {
+        isLongPress = true;
+        currentColor = (currentColor + 32) % 256;
+        saveSettings();
+        Serial.println("Long press - color changed");
+      }
+    } 
+    else if (!currentButtonState && isLongPress) {
+      isLongPress = false;
     }
+    
+    lastButtonState = currentButtonState;
+  }
+  
+  lastRawButtonState = rawButtonState;
 }
 
-// Hue Bridge API Authentication
+// Hue Bridge Authentication
 bool authenticateHueBridge() {
-    if (hueAuthInProgress) {
-        // Check if authentication timeout has occurred
-        if (millis() - hueAuthStartTime > HUE_AUTH_TIMEOUT) {
-            hueAuthInProgress = false;
-            isError = true;
-            errorMessage = "Hue Bridge authentication timeout";
-            return false;
-        }
-        return false;
-    }
-
-    // First, try to get the bridge IP if not set
     if (hueBridgeIP.length() == 0) {
         http.begin(HUE_DISCOVERY_URL);
         int httpCode = http.GET();
-        
         if (httpCode == HTTP_CODE_OK) {
             String payload = http.getString();
             DynamicJsonDocument doc(1024);
-            DeserializationError error = deserializeJson(doc, payload);
-            
-            if (!error && doc.size() > 0) {
+            deserializeJson(doc, payload);
+            if (doc.size() > 0) {
                 hueBridgeIP = doc[0]["internalipaddress"].as<String>();
+                strncpy(settings.hueBridgeIP, hueBridgeIP.c_str(), HUE_MAX_BRIDGE_IP_LENGTH);
+                saveSettings();
             }
+        } else {
+            Serial.println("Hue discovery failed: " + String(httpCode));
+            return false;
         }
         http.end();
     }
-    
-    if (hueBridgeIP.length() == 0) {
-        isError = true;
-        errorMessage = "Could not discover Hue Bridge";
-        return false;
-    }
-    
-    // Try to register the device
+
     String url = "http://" + hueBridgeIP + "/api";
-    String payload = "{\"devicetype\":\"" + String(HUE_DEVICE_TYPE) + "\",\"username\":\"" + hueUsername + "\"}";
-    
+    String payload = "{\"devicetype\":\"" + String(HUE_DEVICE_TYPE) + "\"}";
     http.begin(url);
     http.addHeader("Content-Type", "application/json");
     int httpCode = http.POST(payload);
-    
     if (httpCode == HTTP_CODE_OK) {
         String response = http.getString();
         DynamicJsonDocument doc(1024);
-        DeserializationError error = deserializeJson(doc, response);
-        
-        if (!error && doc.size() > 0) {
-            if (doc[0].containsKey("success")) {
-                hueUsername = doc[0]["success"]["username"].as<String>();
-                isHueAuthenticated = true;
-                hueAuthInProgress = false;
-                return true;
-            } else if (doc[0].containsKey("error")) {
-                if (doc[0]["error"]["type"] == 101) {
-                    // Link button not pressed
-                    isError = true;
-                    errorMessage = "Press link button on Hue Bridge";
-                    return false;
-                }
-            }
+        deserializeJson(doc, response);
+        if (doc[0]["success"]) {
+            hueUsername = doc[0]["success"]["username"].as<String>();
+            isHueAuthenticated = true;
+            Serial.println("Hue authenticated with username: " + hueUsername);
+            return true;
         }
     }
-    
-    isError = true;
-    errorMessage = "Failed to authenticate with Hue Bridge";
+    Serial.println("Hue auth failed: " + String(httpCode));
     return false;
 }
 
-// Update Hue API Endpoints
+// Hue API Endpoints with Pattern Support
 void setupHueEndpoints() {
-    server.on("/api/newdeveloper/lights", HTTP_GET, [](AsyncWebServerRequest *request){
+    server.on("/api/newdeveloper/lights", HTTP_GET, [](AsyncWebServerRequest *request) {
         if (!isHueAuthenticated) {
-            request->send(401, "application/json", "{\"error\":{\"type\":1,\"address\":\"/\",\"description\":\"Unauthorized\"}}");
+            request->send(401, "application/json", "{\"error\":\"Unauthorized\"}");
             return;
         }
-        
-        String response = "{\"1\":{\"state\":{\"on\":true,\"bri\":" + String(currentBrightness) + 
-                         ",\"hue\":" + String(currentColor * 182) + 
-                         ",\"sat\":255,\"effect\":\"none\",\"xy\":[0.5,0.5],\"ct\":500,\"alert\":\"none\",\"colormode\":\"hs\",\"reachable\":true},\"type\":\"extended color light\",\"name\":\"" + String(HUE_DEVICE_NAME) + "\",\"modelid\":\"LCT007\",\"manufacturername\":\"Philips\",\"uniqueid\":\"00:17:88:01:00:d4:12:08-0b\",\"swversion\":\"66009461\",\"pointsymbol\":{\"1\":\"none\",\"2\":\"none\",\"3\":\"none\",\"4\":\"none\",\"5\":\"none\",\"6\":\"none\",\"7\":\"none\",\"8\":\"none\"}}}";
+        String response = "{\"1\":{\"state\":{\"on\":" + String(settings.isOn ? "true" : "false") +
+                          ",\"bri\":" + String(currentBrightness) +
+                          ",\"hue\":" + String(currentColor * 182) +
+                          ",\"sat\":255,\"effect\":\"pattern" + String(currentPattern) + "\"}," +
+                          "\"type\":\"Extended color light\",\"name\":\"" + String(HUE_DEVICE_NAME) + "\"," +
+                          "\"modelid\":\"LCT007\",\"manufacturername\":\"Seeed\"}}";
         request->send(200, "application/json", response);
     });
 
-    server.on("/api/newdeveloper/lights/1/state", HTTP_PUT, [](AsyncWebServerRequest *request){
+    server.on("/api/newdeveloper/lights/1/state", HTTP_PUT, [](AsyncWebServerRequest *request) {
         if (!isHueAuthenticated) {
-            request->send(401, "application/json", "{\"error\":{\"type\":1,\"address\":\"/\",\"description\":\"Unauthorized\"}}");
+            request->send(401, "application/json", "{\"error\":\"Unauthorized\"}");
             return;
         }
-        
-        if(request->hasParam("on", true)) {
-            settings.isOn = request->getParam("on", true)->value() == "true";
+        if (request->hasParam("on", true)) settings.isOn = request->getParam("on", true)->value() == "true";
+        if (request->hasParam("bri", true)) currentBrightness = constrain(request->getParam("bri", true)->value().toInt(), MIN_BRIGHTNESS, MAX_BRIGHTNESS);
+        if (request->hasParam("hue", true)) currentColor = constrain(request->getParam("hue", true)->value().toInt() / 182, 0, 255);
+        if (request->hasParam("effect", true)) {
+            String effect = request->getParam("effect", true)->value();
+            for (int i = 0; i < NUM_PATTERNS; i++) {
+                if (effect == "pattern" + String(i)) {
+                    currentPattern = i;
+                    break;
+                }
+            }
         }
-        if(request->hasParam("bri", true)) {
-            currentBrightness = request->getParam("bri", true)->value().toInt();
-        }
-        if(request->hasParam("hue", true)) {
-            currentColor = request->getParam("hue", true)->value().toInt() / 182;
-        }
-        request->send(200, "application/json", "[{\"success\":{\"/lights/1/state/on\":true}}]");
+        FastLED.setBrightness(currentBrightness);
+        saveSettings();
+        request->send(200, "application/json", "[{\"success\":{\"/lights/1/state/on\":" + String(settings.isOn ? "true" : "false") + "}}]");
     });
 }
 
-// Load Settings from EEPROM
+// Load/Save Settings
 void loadSettings() {
     EEPROM.begin(EEPROM_SIZE);
     EEPROM.get(0, settings);
     EEPROM.end();
-    
-    // Validate settings
-    if (settings.currentPattern >= NUM_PATTERNS) settings.currentPattern = 0;
-    if (settings.currentBrightness > 255) settings.currentBrightness = 128;
-    if (settings.currentColor > 255) settings.currentColor = 0;
-    
-    currentPattern = settings.currentPattern;
-    currentBrightness = settings.currentBrightness;
+    currentPattern = constrain(settings.currentPattern, 0, NUM_PATTERNS - 1);
+    currentBrightness = constrain(settings.currentBrightness, MIN_BRIGHTNESS, MAX_BRIGHTNESS);
     currentColor = settings.currentColor;
-    
-    // Load Hue credentials
-    hueUsername = String(settings.hueUsername);
     hueBridgeIP = String(settings.hueBridgeIP);
-    isHueAuthenticated = settings.isHueAuthenticated;
+    if (hueBridgeIP.length() == 0) hueBridgeIP = HUE_BRIDGE_IP;
 }
 
-// Save Settings to EEPROM
 void saveSettings() {
     settings.currentPattern = currentPattern;
     settings.currentBrightness = currentBrightness;
     settings.currentColor = currentColor;
-    settings.isHueAuthenticated = isHueAuthenticated;
-    
-    // Save Hue credentials
-    strncpy(settings.hueUsername, hueUsername.c_str(), HUE_MAX_USERNAME_LENGTH - 1);
-    strncpy(settings.hueBridgeIP, hueBridgeIP.c_str(), HUE_MAX_BRIDGE_IP_LENGTH - 1);
-    
+    settings.isOn = true;
     EEPROM.begin(EEPROM_SIZE);
     EEPROM.put(0, settings);
     EEPROM.commit();
@@ -311,185 +249,96 @@ void saveSettings() {
 // Battery Management
 void checkBattery() {
     if (millis() - lastBatteryCheck >= BATTERY_CHECK_INTERVAL) {
-        // Take a new reading
-        batteryReadings[batteryIndex] = analogRead(BATTERY_PIN);
-        batteryIndex = (batteryIndex + 1) % BATTERY_SAMPLES;
-        
-        // Calculate average
-        uint32_t sum = 0;
+        int batteryValue = 0;
         for (int i = 0; i < BATTERY_SAMPLES; i++) {
-            sum += batteryReadings[i];
+            batteryValue += analogRead(BATTERY_PIN);
+            delay(10);
         }
-        
-        uint16_t average = sum / BATTERY_SAMPLES;
-        
-        // Validate reading
-        if (average > 0 && average < 4095) {
-            batteryLevel = map(average, 0, 4095, 0, 100);
-            
-            // Power management
-            if (batteryLevel < 20) {
-                // Reduce brightness to save power
-                currentBrightness = currentBrightness / 2;
-                FastLED.setBrightness(currentBrightness);
-                
-                // Set error state for low battery
-                isError = true;
-                errorMessage = "Low Battery";
-            } else if (batteryLevel > 80) {
-                // Clear error state if battery is good
-                isError = false;
-            }
+        batteryValue /= BATTERY_SAMPLES;
+        int batteryPercent = map(batteryValue, 0, 4095, 0, 100);  // Adjust mapping based on actual voltage range
+        if (batteryPercent < BATTERY_LOW_THRESHOLD) {
+            currentBrightness = min(currentBrightness, (uint8_t)(MAX_BRIGHTNESS / 4));  // Explicit cast to uint8_t
+            FastLED.setBrightness(currentBrightness);
+            Serial.println("Low battery: " + String(batteryPercent) + "%");
         }
-        
         lastBatteryCheck = millis();
     }
 }
 
-// Watchdog Timer ISR
-void IRAM_ATTR resetModule() {
-    esp_restart();
-}
-
-// Initialize Watchdog Timer
-void setupWatchdog() {
-    watchdogTimer = timerBegin(0, 80, true);
-    timerAttachInterrupt(watchdogTimer, &resetModule, true);
-    timerAlarmWrite(watchdogTimer, 30000000, true);
-    timerAlarmEnable(watchdogTimer);
-}
-
-// WiFi Connection Management
+// WiFi Setup with Retry
 void setupWiFi() {
     WiFiManager wifiManager;
-    wifiManager.setConfigPortalTimeout(180);
-    
-    int retryCount = 0;
-    while (retryCount < 3) {
-        if (wifiManager.autoConnect("XIAO_Hue_Controller")) {
-            break;
-        }
-        retryCount++;
+    wifiManager.setConfigPortalTimeout(WIFI_CONFIG_TIMEOUT);
+    int retries = 0;
+    while (!wifiManager.autoConnect(WIFI_SSID, WIFI_PASSWORD) && retries < WIFI_MAX_RETRIES) {
+        Serial.println("WiFi connection failed, retrying...");
+        retries++;
         delay(5000);
     }
-    
-    if (retryCount >= 3) {
-        isError = true;
-        errorMessage = "Failed to connect to WiFi after 3 attempts";
-        return;
-    }
-    
-    // Test Hue Bridge connection with retry
-    retryCount = 0;
-    while (retryCount < 3) {
-        if (Ping.ping(settings.hueBridgeIP)) {
-            return;
-        }
-        retryCount++;
-        delay(2000);
-    }
-    
-    isError = true;
-    errorMessage = "Hue Bridge not reachable after 3 attempts";
-}
-
-// Error Handling
-void handleError() {
-    if (isError) {
-        unsigned long currentMillis = millis();
-        if (currentMillis - lastErrorBlink >= ERROR_BLINK_INTERVAL) {
-            errorLedState = !errorLedState;
-            fill_solid(leds, NUM_LEDS, errorLedState ? CRGB::Red : CRGB::Black);
-            FastLED.show();
-            lastErrorBlink = currentMillis;
-        }
+    if (retries >= WIFI_MAX_RETRIES) {
+        Serial.println("WiFi failed after max retries, restarting...");
+        ESP.restart();
     }
 }
 
-// Touch Sensor Calibration
-bool calibrateTouch() {
-    static int sum = 0;
-    static int count = 0;
-    static unsigned long lastCalibration = 0;
-    
-    if (millis() - lastCalibration >= 100) {
-        sum += touch.read();
-        count++;
-        lastCalibration = millis();
-        
-        if (count >= 10) {
-            TOUCH_THRESHOLD = (sum / 10) + 20;
-            return true;
-        }
+// Error Indication
+void indicateError() {
+    static unsigned long lastBlink = 0;
+    static bool ledState = false;
+    if (millis() - lastBlink >= ERROR_BLINK_INTERVAL) {
+        ledState = !ledState;
+        fill_solid(leds, NUM_LEDS, ledState ? CRGB::Red : CRGB::Black);
+        FastLED.show();
+        lastBlink = millis();
     }
-    return false;
 }
 
 void setup() {
-    // Initialize watchdog
-    setupWatchdog();
-    
-    // Load settings
-    loadSettings();
-    
-    // Initialize LED strip
+    Serial.begin(115200);
+    delay(1000);
+
     FastLED.addLeds<LED_TYPE, LED_PIN, COLOR_ORDER>(leds, NUM_LEDS);
     FastLED.setBrightness(currentBrightness);
-    
-    // Initialize touch sensor
-    touch.begin();
-    calibrateTouch();
-    
-    // Setup WiFi
+
+    loadSettings();
+    pinMode(BUTTON_PIN, INPUT_PULLUP);
+    pinMode(BATTERY_PIN, INPUT);
+
     setupWiFi();
-    
-    // Start Hue Bridge authentication
     if (!isHueAuthenticated) {
-        hueAuthInProgress = true;
-        hueAuthStartTime = millis();
+        for (int i = 0; i < HUE_RETRY_COUNT; i++) {
+            if (authenticateHueBridge()) break;
+            delay(HUE_RETRY_DELAY);
+            if (i == HUE_RETRY_COUNT - 1) indicateError();
+        }
     }
-    
-    // Setup web server
     setupHueEndpoints();
     server.begin();
-    
-    // Initialize battery monitoring
-    pinMode(BATTERY_PIN, INPUT);
+
+    Serial.println("System initialized");
 }
 
 void loop() {
-    // Reset watchdog timer
-    timerWrite(watchdogTimer, 0);
-    
     unsigned long currentMillis = millis();
-    
-    // Check battery
-    checkBattery();
-    
-    // Handle errors
-    handleError();
-    
-    // Handle touch input
-    handleTouch();
-    
-    // Check Hue Bridge authentication
-    if (!isHueAuthenticated && currentMillis - lastHueAuthCheck >= 5000) {
-        if (authenticateHueBridge()) {
-            saveSettings();
-        }
-        lastHueAuthCheck = currentMillis;
+
+    if (!WiFi.isConnected()) {
+        indicateError();
+        setupWiFi();
     }
-    
-    // Update pattern if interval has elapsed
+    if (!isHueAuthenticated) indicateError();
+
+    checkBattery();
+    handleButton();
+
     if (currentMillis - lastPatternUpdate >= PATTERN_UPDATE_INTERVAL) {
-        patterns[currentPattern]();
+        if (settings.isOn) patterns[currentPattern]();
+        else fill_solid(leds, NUM_LEDS, CRGB::Black);
         FastLED.show();
         lastPatternUpdate = currentMillis;
     }
-    
-    // Save settings periodically
+
     static unsigned long lastSave = 0;
-    if (currentMillis - lastSave >= 300000) { // Every 5 minutes
+    if (currentMillis - lastSave >= SETTINGS_SAVE_INTERVAL) {
         saveSettings();
         lastSave = currentMillis;
     }

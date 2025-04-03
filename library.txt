@@ -1,36 +1,42 @@
-# Required Libraries for Philips Hue LED Controller
-
-# Core Libraries
+Required Libraries for Philips Hue LED Controller
+Core Libraries
 FastLED@3.5.0
 ESPAsyncWebServer@1.2.3
-ESPAsyncTCP@1.2.2
 ArduinoJson@6.21.3
 
-# Hardware Support
-ESP32Touch@1.0.0
-EEPROM@1.0.1
-
-# Network and Communication
+Network and Communication
 WiFiManager@2.0.16
-ESP32Ping@1.7
 
-# Installation Instructions:
-# 1. Open Arduino IDE
-# 2. Go to Tools > Manage Libraries
-# 3. Search for each library and install the specified version
-# 4. Restart Arduino IDE after installation
+Built-in Libraries (Included with ESP32 Core)
+EEPROM
+HTTPClient
 
-# Additional Setup:
-# 1. Enable EEPROM in Arduino IDE (Tools > EEPROM)
-# 2. Set Flash Size to 4MB (Tools > Flash Size)
-# 3. Set Partition Scheme to "Huge APP" (Tools > Partition Scheme)
-# 4. Set CPU Frequency to 160MHz (Tools > CPU Frequency)
-# 5. Set Upload Speed to 921600 (Tools > Upload Speed)
-
-# Important Notes:
-# - Make sure to install ESP32 board support in Arduino IDE
-# - Some libraries may require additional dependencies
-# - If you encounter compilation errors, try:
-#   1. Clear Arduino IDE cache
-#   2. Remove and reinstall problematic libraries
-#   3. Update ESP32 board support package 
+Installation Instructions:
+1. Open Arduino IDE
+2. Go to Sketch > Include Library > Manage Libraries
+3. Search for each library and install the specified version:
+- FastLED@3.5.0
+- ESPAsyncWebServer@1.2.3
+- ArduinoJson@6.21.3
+- WiFiManager@2.0.16
+4. No additional installation is needed for EEPROM and HTTPClient (included with ESP32 board support)
+5. Restart Arduino IDE after installation
+Additional Setup:
+1. Install ESP32 Board Support:
+- Go to File > Preferences
+- Add to "Additional Boards Manager URLs": https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
+- Go to Tools > Board > Boards Manager, search for "esp32", and install the latest version
+2. Configure Board Settings:
+- Tools > Board > ESP32 Arduino > Seeed Studio XIAO ESP32C3
+- Tools > Flash Size > 4MB
+- Tools > Partition Scheme > Huge APP
+- Tools > CPU Frequency > 160MHz
+- Tools > Upload Speed > 921600
+Important Notes:
+- Ensure ESP32 board support is installed before adding libraries
+- EEPROM and HTTPClient are part of the ESP32 core; no separate installation is required
+- If you encounter compilation errors, try:
+1. Verify all libraries are installed at the specified versions
+2. Update the ESP32 board support package in Boards Manager
+3. Clear the Arduino IDE cache by closing and reopening the IDE
+4. Check that config.h is in the same directory as your .ino file
