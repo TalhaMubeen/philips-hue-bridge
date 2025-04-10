@@ -92,55 +92,49 @@ PatternFunction patterns[] = {solidColor, rainbowWave, breathingEffect, chaseEff
 
 // Button Functions
 void handleButton() {
-  static unsigned long lastDebounceTime = 0;
-  static bool lastRawButtonState = false;
-  bool rawButtonState = digitalRead(BUTTON_PIN);
-  
+    static unsigned long lastDebounceTime = 0;
+    static bool lastRawButtonState = false;
+    bool rawButtonState = digitalRead(BUTTON_PIN);
+
   // Debounce the button reading
-  if (rawButtonState != lastRawButtonState) {
-    lastDebounceTime = millis();
-  }
-  
-  if ((millis() - lastDebounceTime) > BUTTON_DEBOUNCE_TIME) {
+    if (rawButtonState != lastRawButtonState) {
+        lastDebounceTime = millis();
+    }
+
+    if ((millis() - lastDebounceTime) > BUTTON_DEBOUNCE_TIME) {
     // Button state is stable, update current state
     currentButtonState = !rawButtonState;  // Invert because of pull-up resistor
     
-    if (currentButtonState && !lastButtonState) {
-      // Button press detected
-      unsigned long currentTime = millis();
-      
-      if (currentTime - lastButtonTime < BUTTON_DOUBLE_TAP_DURATION) {
-        // Double tap - brightness change
-        currentBrightness = (currentBrightness + (MAX_BRIGHTNESS / BRIGHTNESS_STEPS)) % (MAX_BRIGHTNESS + 1);
-        FastLED.setBrightness(currentBrightness);
-        saveSettings();
-        Serial.println("Double tap - brightness changed");
-      } else {
-        // Single tap - pattern change
-        currentPattern = (currentPattern + 1) % NUM_PATTERNS;
-        saveSettings();
-        Serial.println("Single tap - pattern changed");
-      }
-      lastButtonTime = currentTime;
-      buttonStartTime = currentTime;
-    } 
-    else if (currentButtonState && (millis() - buttonStartTime > BUTTON_LONG_PRESS_DURATION)) {
-      // Long press - color cycle
-      if (!isLongPress) {
-        isLongPress = true;
-        currentColor = (currentColor + 32) % 256;
-        saveSettings();
-        Serial.println("Long press - color changed");
-      }
+        if (currentButtonState && !lastButtonState) {
+            unsigned long currentTime = millis();
+            if (currentTime - lastButtonTime < BUTTON_DOUBLE_TAP_DURATION) {
+                currentBrightness = (currentBrightness + (MAX_BRIGHTNESS / BRIGHTNESS_STEPS)) % (MAX_BRIGHTNESS + 1);
+                FastLED.setBrightness(currentBrightness);
+                saveSettings();
+                Serial.println("Double tap - brightness changed to " + String(currentBrightness));
+            } else {
+                currentPattern = (currentPattern + 1) % NUM_PATTERNS;
+                saveSettings();
+                Serial.println("Single tap - pattern changed to " + String(currentPattern));
+            }
+            lastButtonTime = currentTime;
+            buttonStartTime = currentTime;
+        } else if (currentButtonState && (millis() - buttonStartTime > BUTTON_LONG_PRESS_DURATION)) {
+            if (!isLongPress) {
+                isLongPress = true;
+                currentColor = (currentColor + 32) % 256;
+                saveSettings();
+                Serial.println("Long press - color changed to " + String(currentColor));
+            }
     } 
     else if (!currentButtonState && isLongPress) {
-      isLongPress = false;
-    }
+            isLongPress = false;
+        }
     
-    lastButtonState = currentButtonState;
-  }
+        lastButtonState = currentButtonState;
+    }
   
-  lastRawButtonState = rawButtonState;
+    lastRawButtonState = rawButtonState;
 }
 
 // Hue Bridge Authentication
@@ -240,6 +234,7 @@ void saveSettings() {
     settings.currentBrightness = currentBrightness;
     settings.currentColor = currentColor;
     settings.isOn = true;
+    strncpy(settings.hueBridgeIP, hueBridgeIP.c_str(), HUE_MAX_BRIDGE_IP_LENGTH);
     EEPROM.begin(EEPROM_SIZE);
     EEPROM.put(0, settings);
     EEPROM.commit();
@@ -299,6 +294,9 @@ void setup() {
 
     FastLED.addLeds<LED_TYPE, LED_PIN, COLOR_ORDER>(leds, NUM_LEDS);
     FastLED.setBrightness(currentBrightness);
+    settings.isOn = true;  // Start with LEDs on
+    fill_solid(leds, NUM_LEDS, CRGB::Blue);  // Test with blue
+    FastLED.show();
 
     loadSettings();
     pinMode(BUTTON_PIN, INPUT_PULLUP);
@@ -324,13 +322,18 @@ void loop() {
     if (!WiFi.isConnected()) {
         indicateError();
         setupWiFi();
+        Serial.println("WiFi disconnected, attempting reconnect");
     }
-    if (!isHueAuthenticated) indicateError();
+    if (!isHueAuthenticated) {
+        indicateError();
+        Serial.println("Hue not authenticated");
+    }
 
     checkBattery();
     handleButton();
 
     if (currentMillis - lastPatternUpdate >= PATTERN_UPDATE_INTERVAL) {
+        Serial.println("Pattern: " + String(currentPattern) + ", Brightness: " + String(currentBrightness) + ", On: " + String(settings.isOn));
         if (settings.isOn) patterns[currentPattern]();
         else fill_solid(leds, NUM_LEDS, CRGB::Black);
         FastLED.show();

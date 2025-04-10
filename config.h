@@ -20,7 +20,7 @@
 #define HUE_AUTH_TIMEOUT 30000
 
 // LED Configuration
-#define LED_PIN 2
+#define LED_PIN 10
 #define NUM_LEDS 10
 #define LED_TYPE WS2812
 #define COLOR_ORDER GRB
