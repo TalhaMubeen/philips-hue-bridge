@@ -4,7 +4,7 @@
 #include <EEPROM.h>
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
-#include <ESPmDNS.h>  // Add mDNS library for local discovery
+#include <ESPmDNS.h>
 #define ASYNCWEBSERVER_REGEX
 #include <ESPAsyncWebServer.h>
 
@@ -96,7 +96,18 @@ void handleButton() {
     static unsigned long lastDebounceTime = 0;
     static bool lastRawButtonState = false;
     bool rawButtonState = digitalRead(BUTTON_PIN);
-    Serial.println("Raw button state: " + String(rawButtonState));
+    Serial.println("Raw button state on pin " + String(BUTTON_PIN) + ": " + String(rawButtonState));
+
+    // Check if the pin is stuck (always HIGH or LOW)
+    static unsigned long lastChangeTime = 0;
+    static bool lastLoggedState = rawButtonState;
+    if (rawButtonState != lastLoggedState) {
+        lastChangeTime = millis();
+        lastLoggedState = rawButtonState;
+    }
+    if (millis() - lastChangeTime > 10000) {  // No change in 10 seconds
+        Serial.println("Warning: Button state on pin " + String(BUTTON_PIN) + " has not changed in 10 seconds. Possible wiring or pin issue.");
+    }
 
     if (rawButtonState != lastRawButtonState) {
         lastDebounceTime = millis();
@@ -151,9 +162,14 @@ bool discoverHueBridgeViaMDNS() {
 
     for (int i = 0; i < n; ++i) {
         String name = MDNS.hostname(i);
-        Serial.println("Found Hue Bridge: " + name + " at IP: " + MDNS.IP(i).toString());
+        String ip = MDNS.IP(i).toString();
+        Serial.println("Found Hue Bridge: " + name + " at IP: " + ip);
+        // Check TXT records for bridgeid and modelid
+        String bridgeid = MDNS.txt(i, "bridgeid");
+        String modelid = MDNS.txt(i, "modelid");
+        Serial.println("Bridge ID: " + bridgeid + ", Model ID: " + modelid);
         if (name.startsWith("Philips Hue")) {
-            hueBridgeIP = MDNS.IP(i).toString();
+            hueBridgeIP = ip;
             Serial.println("Selected Hue Bridge IP: " + hueBridgeIP);
             strncpy(settings.hueBridgeIP, hueBridgeIP.c_str(), HUE_MAX_BRIDGE_IP_LENGTH);
             saveSettings();
@@ -168,6 +184,7 @@ bool discoverHueBridgeViaMDNS() {
 bool discoverHueBridgeViaCloud() {
     Serial.println("Attempting Hue Bridge discovery via Cloud...");
     http.begin(HUE_DISCOVERY_URL);
+    http.setTimeout(10000);  // Increase timeout to 10 seconds
     int httpCode = http.GET();
     if (httpCode == HTTP_CODE_OK) {
         String payload = http.getString();
@@ -221,6 +238,7 @@ bool authenticateHueBridge() {
     Serial.println("POST URL: " + url);
     Serial.println("POST Payload: " + payload);
     http.begin(url);
+    http.setTimeout(10000);  // Increase timeout to 10 seconds
     http.addHeader("Content-Type", "application/json");
     int httpCode = http.POST(payload);
     if (httpCode == HTTP_CODE_OK) {
@@ -235,6 +253,10 @@ bool authenticateHueBridge() {
             return true;
         } else {
             Serial.println("Auth response contains no success field");
+            // Check for link button error
+            if (doc[0]["error"]["type"].as<int>() == 101) {
+                Serial.println("Link button not pressed on Hue Bridge. Please press the link button and try again.");
+            }
         }
     }
     Serial.println("Hue auth failed: " + String(httpCode));
@@ -390,8 +412,7 @@ void loop() {
     if (!isHueAuthenticated) {
         indicateError();
         Serial.println("Hue not authenticated");
-        // Retry authentication periodically
-        if (currentMillis - lastDiscoveryAttempt >= 60000) {  // Retry every 60 seconds
+        if (currentMillis - lastDiscoveryAttempt >= 60000) {
             if (authenticateHueBridge()) {
                 Serial.println("Hue authentication successful after retry");
             }
