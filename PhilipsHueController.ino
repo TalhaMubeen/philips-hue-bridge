@@ -105,7 +105,7 @@ void handleButton() {
         lastChangeTime = millis();
         lastLoggedState = rawButtonState;
     }
-    if (millis() - lastChangeTime > 10000) {  // No change in 10 seconds
+    if (millis() - lastChangeTime > 10000) {
         Serial.println("Warning: Button state on pin " + String(BUTTON_PIN) + " has not changed in 10 seconds. Possible wiring or pin issue.");
     }
 
@@ -154,28 +154,53 @@ bool discoverHueBridgeViaMDNS() {
         return false;
     }
 
+    // Try _hue._tcp first
+    Serial.println("Querying for _hue._tcp...");
     int n = MDNS.queryService("hue", "tcp");
-    if (n == 0) {
-        Serial.println("No Hue Bridges found via mDNS");
-        return false;
+    if (n > 0) {
+        for (int i = 0; i < n; ++i) {
+            String name = MDNS.hostname(i);
+            String ip = MDNS.IP(i).toString();
+            Serial.println("Found Hue Bridge: " + name + " at IP: " + ip);
+            String bridgeid = MDNS.txt(i, "bridgeid");
+            String modelid = MDNS.txt(i, "modelid");
+            Serial.println("Bridge ID: " + bridgeid + ", Model ID: " + modelid);
+            if (name.startsWith("Philips Hue")) {
+                hueBridgeIP = ip;
+                Serial.println("Selected Hue Bridge IP: " + hueBridgeIP);
+                strncpy(settings.hueBridgeIP, hueBridgeIP.c_str(), HUE_MAX_BRIDGE_IP_LENGTH);
+                saveSettings();
+                return true;
+            }
+        }
+    } else {
+        Serial.println("No Hue Bridges found via _hue._tcp");
     }
 
-    for (int i = 0; i < n; ++i) {
-        String name = MDNS.hostname(i);
-        String ip = MDNS.IP(i).toString();
-        Serial.println("Found Hue Bridge: " + name + " at IP: " + ip);
-        // Check TXT records for bridgeid and modelid
-        String bridgeid = MDNS.txt(i, "bridgeid");
-        String modelid = MDNS.txt(i, "modelid");
-        Serial.println("Bridge ID: " + bridgeid + ", Model ID: " + modelid);
-        if (name.startsWith("Philips Hue")) {
-            hueBridgeIP = ip;
-            Serial.println("Selected Hue Bridge IP: " + hueBridgeIP);
-            strncpy(settings.hueBridgeIP, hueBridgeIP.c_str(), HUE_MAX_BRIDGE_IP_LENGTH);
-            saveSettings();
-            return true;
+    // Fall back to _huesync._tcp
+    Serial.println("Querying for _huesync._tcp...");
+    n = MDNS.queryService("huesync", "tcp");
+    if (n > 0) {
+        for (int i = 0; i < n; ++i) {
+            String name = MDNS.hostname(i);
+            String ip = MDNS.IP(i).toString();
+            Serial.println("Found HueSync device: " + name + " at IP: " + ip);
+            String devicetype = MDNS.txt(i, "devicetype");
+            String uniqueid = MDNS.txt(i, "uniqueid");
+            Serial.println("Device Type: " + devicetype + ", Unique ID: " + uniqueid);
+            // Check if this is a Hue Bridge (devicetype might indicate a bridge)
+            if (devicetype.indexOf("bridge") >= 0 || name.startsWith("Philips Hue")) {
+                hueBridgeIP = ip;
+                Serial.println("Selected Hue Bridge IP via _huesync: " + hueBridgeIP);
+                strncpy(settings.hueBridgeIP, hueBridgeIP.c_str(), HUE_MAX_BRIDGE_IP_LENGTH);
+                saveSettings();
+                return true;
+            }
         }
+    } else {
+        Serial.println("No HueSync devices found via _huesync._tcp");
     }
+
     Serial.println("No matching Hue Bridge found via mDNS");
     return false;
 }
@@ -184,7 +209,7 @@ bool discoverHueBridgeViaMDNS() {
 bool discoverHueBridgeViaCloud() {
     Serial.println("Attempting Hue Bridge discovery via Cloud...");
     http.begin(HUE_DISCOVERY_URL);
-    http.setTimeout(10000);  // Increase timeout to 10 seconds
+    http.setTimeout(10000);
     int httpCode = http.GET();
     if (httpCode == HTTP_CODE_OK) {
         String payload = http.getString();
@@ -210,13 +235,11 @@ bool discoverHueBridgeViaCloud() {
 
 // Hue Bridge Authentication
 bool authenticateHueBridge() {
-    // Try mDNS discovery first
     if (hueBridgeIP == HUE_BRIDGE_IP || hueBridgeIP.length() == 0) {
         if (discoverHueBridgeViaMDNS()) {
             Serial.println("mDNS discovery successful, using IP: " + hueBridgeIP);
         } else {
             Serial.println("mDNS discovery failed, falling back to Cloud discovery...");
-            // Respect rate limit: one request per 15 minutes (900,000 ms)
             if (millis() - lastDiscoveryAttempt >= 900000) {
                 if (discoverHueBridgeViaCloud()) {
                     lastDiscoveryAttempt = millis();
@@ -238,7 +261,7 @@ bool authenticateHueBridge() {
     Serial.println("POST URL: " + url);
     Serial.println("POST Payload: " + payload);
     http.begin(url);
-    http.setTimeout(10000);  // Increase timeout to 10 seconds
+    http.setTimeout(10000);
     http.addHeader("Content-Type", "application/json");
     int httpCode = http.POST(payload);
     if (httpCode == HTTP_CODE_OK) {
@@ -253,7 +276,6 @@ bool authenticateHueBridge() {
             return true;
         } else {
             Serial.println("Auth response contains no success field");
-            // Check for link button error
             if (doc[0]["error"]["type"].as<int>() == 101) {
                 Serial.println("Link button not pressed on Hue Bridge. Please press the link button and try again.");
             }
