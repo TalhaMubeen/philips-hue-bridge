@@ -4,6 +4,7 @@
 #include <EEPROM.h>
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
+#include <ESPmDNS.h>  // Add mDNS library for local discovery
 #define ASYNCWEBSERVER_REGEX
 #include <ESPAsyncWebServer.h>
 
@@ -35,7 +36,7 @@ struct Settings {
     uint8_t currentBrightness;
     uint8_t currentColor;
     bool isOn;
-    char hueBridgeIP[HUE_MAX_BRIDGE_IP_LENGTH];  // Store IP persistently
+    char hueBridgeIP[HUE_MAX_BRIDGE_IP_LENGTH];
 };
 Settings settings;
 const int EEPROM_SIZE = sizeof(Settings);
@@ -43,6 +44,7 @@ const int EEPROM_SIZE = sizeof(Settings);
 // Battery and Timing
 unsigned long lastBatteryCheck = 0;
 unsigned long lastPatternUpdate = 0;
+unsigned long lastDiscoveryAttempt = 0;
 
 // Pattern Functions
 void solidColor() {
@@ -86,7 +88,6 @@ void colorCycle() {
     hue++;
 }
 
-// Define PatternFunction type
 typedef void (*PatternFunction)();
 PatternFunction patterns[] = {solidColor, rainbowWave, breathingEffect, chaseEffect, twinkleEffect, colorCycle};
 
@@ -95,16 +96,16 @@ void handleButton() {
     static unsigned long lastDebounceTime = 0;
     static bool lastRawButtonState = false;
     bool rawButtonState = digitalRead(BUTTON_PIN);
+    Serial.println("Raw button state: " + String(rawButtonState));
 
-  // Debounce the button reading
     if (rawButtonState != lastRawButtonState) {
         lastDebounceTime = millis();
+        Serial.println("Debounce triggered, time: " + String(lastDebounceTime));
     }
 
     if ((millis() - lastDebounceTime) > BUTTON_DEBOUNCE_TIME) {
-    // Button state is stable, update current state
-    currentButtonState = !rawButtonState;  // Invert because of pull-up resistor
-    
+        currentButtonState = !rawButtonState;
+        Serial.println("Current button state: " + String(currentButtonState));
         if (currentButtonState && !lastButtonState) {
             unsigned long currentTime = millis();
             if (currentTime - lastButtonTime < BUTTON_DOUBLE_TAP_DURATION) {
@@ -126,45 +127,105 @@ void handleButton() {
                 saveSettings();
                 Serial.println("Long press - color changed to " + String(currentColor));
             }
-    } 
-    else if (!currentButtonState && isLongPress) {
+        } else if (!currentButtonState && isLongPress) {
             isLongPress = false;
         }
-    
         lastButtonState = currentButtonState;
     }
-  
     lastRawButtonState = rawButtonState;
+}
+
+// mDNS Discovery for Hue Bridge
+bool discoverHueBridgeViaMDNS() {
+    Serial.println("Starting mDNS discovery for Hue Bridge...");
+    if (!MDNS.begin("xiao-hue")) {
+        Serial.println("Error setting up mDNS responder!");
+        return false;
+    }
+
+    int n = MDNS.queryService("hue", "tcp");
+    if (n == 0) {
+        Serial.println("No Hue Bridges found via mDNS");
+        return false;
+    }
+
+    for (int i = 0; i < n; ++i) {
+        String name = MDNS.hostname(i);
+        Serial.println("Found Hue Bridge: " + name + " at IP: " + MDNS.IP(i).toString());
+        if (name.startsWith("Philips Hue")) {
+            hueBridgeIP = MDNS.IP(i).toString();
+            Serial.println("Selected Hue Bridge IP: " + hueBridgeIP);
+            strncpy(settings.hueBridgeIP, hueBridgeIP.c_str(), HUE_MAX_BRIDGE_IP_LENGTH);
+            saveSettings();
+            return true;
+        }
+    }
+    Serial.println("No matching Hue Bridge found via mDNS");
+    return false;
+}
+
+// Cloud Discovery for Hue Bridge
+bool discoverHueBridgeViaCloud() {
+    Serial.println("Attempting Hue Bridge discovery via Cloud...");
+    http.begin(HUE_DISCOVERY_URL);
+    int httpCode = http.GET();
+    if (httpCode == HTTP_CODE_OK) {
+        String payload = http.getString();
+        Serial.println("Discovery response: " + payload);
+        DynamicJsonDocument doc(1024);
+        deserializeJson(doc, payload);
+        if (doc.size() > 0) {
+            hueBridgeIP = doc[0]["internalipaddress"].as<String>();
+            Serial.println("Discovered Hue Bridge IP: " + hueBridgeIP);
+            strncpy(settings.hueBridgeIP, hueBridgeIP.c_str(), HUE_MAX_BRIDGE_IP_LENGTH);
+            saveSettings();
+            return true;
+        } else {
+            Serial.println("No Hue Bridge found in discovery response");
+            return false;
+        }
+    } else {
+        Serial.println("Hue discovery failed: " + String(httpCode));
+        return false;
+    }
+    http.end();
 }
 
 // Hue Bridge Authentication
 bool authenticateHueBridge() {
-    if (hueBridgeIP.length() == 0) {
-        http.begin(HUE_DISCOVERY_URL);
-        int httpCode = http.GET();
-        if (httpCode == HTTP_CODE_OK) {
-            String payload = http.getString();
-            DynamicJsonDocument doc(1024);
-            deserializeJson(doc, payload);
-            if (doc.size() > 0) {
-                hueBridgeIP = doc[0]["internalipaddress"].as<String>();
-                strncpy(settings.hueBridgeIP, hueBridgeIP.c_str(), HUE_MAX_BRIDGE_IP_LENGTH);
-                saveSettings();
-            }
+    // Try mDNS discovery first
+    if (hueBridgeIP == HUE_BRIDGE_IP || hueBridgeIP.length() == 0) {
+        if (discoverHueBridgeViaMDNS()) {
+            Serial.println("mDNS discovery successful, using IP: " + hueBridgeIP);
         } else {
-            Serial.println("Hue discovery failed: " + String(httpCode));
-            return false;
+            Serial.println("mDNS discovery failed, falling back to Cloud discovery...");
+            // Respect rate limit: one request per 15 minutes (900,000 ms)
+            if (millis() - lastDiscoveryAttempt >= 900000) {
+                if (discoverHueBridgeViaCloud()) {
+                    lastDiscoveryAttempt = millis();
+                    Serial.println("Cloud discovery successful, using IP: " + hueBridgeIP);
+                } else {
+                    Serial.println("Cloud discovery failed");
+                    return false;
+                }
+            } else {
+                Serial.println("Cloud discovery skipped due to rate limit");
+                return false;
+            }
         }
-        http.end();
     }
 
+    Serial.println("Attempting authentication with Hue Bridge at: " + hueBridgeIP);
     String url = "http://" + hueBridgeIP + "/api";
     String payload = "{\"devicetype\":\"" + String(HUE_DEVICE_TYPE) + "\"}";
+    Serial.println("POST URL: " + url);
+    Serial.println("POST Payload: " + payload);
     http.begin(url);
     http.addHeader("Content-Type", "application/json");
     int httpCode = http.POST(payload);
     if (httpCode == HTTP_CODE_OK) {
         String response = http.getString();
+        Serial.println("Auth response: " + response);
         DynamicJsonDocument doc(1024);
         deserializeJson(doc, response);
         if (doc[0]["success"]) {
@@ -172,13 +233,15 @@ bool authenticateHueBridge() {
             isHueAuthenticated = true;
             Serial.println("Hue authenticated with username: " + hueUsername);
             return true;
+        } else {
+            Serial.println("Auth response contains no success field");
         }
     }
     Serial.println("Hue auth failed: " + String(httpCode));
     return false;
 }
 
-// Hue API Endpoints with Pattern Support
+// Hue API Endpoints
 void setupHueEndpoints() {
     server.on("/api/newdeveloper/lights", HTTP_GET, [](AsyncWebServerRequest *request) {
         if (!isHueAuthenticated) {
@@ -250,9 +313,9 @@ void checkBattery() {
             delay(10);
         }
         batteryValue /= BATTERY_SAMPLES;
-        int batteryPercent = map(batteryValue, 0, 4095, 0, 100);  // Adjust mapping based on actual voltage range
+        int batteryPercent = map(batteryValue, 0, 4095, 0, 100);
         if (batteryPercent < BATTERY_LOW_THRESHOLD) {
-            currentBrightness = min(currentBrightness, (uint8_t)(MAX_BRIGHTNESS / 4));  // Explicit cast to uint8_t
+            currentBrightness = min(currentBrightness, (uint8_t)(MAX_BRIGHTNESS / 4));
             FastLED.setBrightness(currentBrightness);
             Serial.println("Low battery: " + String(batteryPercent) + "%");
         }
@@ -260,7 +323,7 @@ void checkBattery() {
     }
 }
 
-// WiFi Setup with Retry
+// WiFi Setup
 void setupWiFi() {
     WiFiManager wifiManager;
     wifiManager.setConfigPortalTimeout(WIFI_CONFIG_TIMEOUT);
@@ -294,8 +357,8 @@ void setup() {
 
     FastLED.addLeds<LED_TYPE, LED_PIN, COLOR_ORDER>(leds, NUM_LEDS);
     FastLED.setBrightness(currentBrightness);
-    settings.isOn = true;  // Start with LEDs on
-    fill_solid(leds, NUM_LEDS, CRGB::Blue);  // Test with blue
+    settings.isOn = true;
+    fill_solid(leds, NUM_LEDS, CRGB::Blue);
     FastLED.show();
 
     loadSettings();
@@ -327,6 +390,13 @@ void loop() {
     if (!isHueAuthenticated) {
         indicateError();
         Serial.println("Hue not authenticated");
+        // Retry authentication periodically
+        if (currentMillis - lastDiscoveryAttempt >= 60000) {  // Retry every 60 seconds
+            if (authenticateHueBridge()) {
+                Serial.println("Hue authentication successful after retry");
+            }
+            lastDiscoveryAttempt = currentMillis;
+        }
     }
 
     checkBattery();
