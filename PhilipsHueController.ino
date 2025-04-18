@@ -160,7 +160,7 @@ bool discoverHueBridgeViaMDNS() {
         if (n > 0) {
             for (int i = 0; i < n; ++i) {
                 String name = MDNS.hostname(i);
-                IPAddress ip = MDNS.IP(i);  // Corrected to use MDNS.IP(i)
+                IPAddress ip = MDNS.address(i);
                 String ipStr = ip.toString();
                 Serial.println("Found Hue Bridge: " + name + " at IP: " + ipStr);
                 String bridgeid = MDNS.txt(i, "bridgeid");
@@ -184,7 +184,7 @@ bool discoverHueBridgeViaMDNS() {
         if (n > 0) {
             for (int i = 0; i < n; ++i) {
                 String name = MDNS.hostname(i);
-                IPAddress ip = MDNS.IP(i);  // Corrected to use MDNS.IP(i)
+                IPAddress ip = MDNS.address(i);
                 String ipStr = ip.toString();
                 Serial.println("Found HueSync device: " + name + " at IP: " + ipStr);
                 String devicetype = MDNS.txt(i, "devicetype");
@@ -243,9 +243,9 @@ bool discoverHueBridgeViaCloud() {
     } catch (const std::exception& e) {
         Serial.println("Error in cloud discovery: " + String(e.what()));
         return false;
-    } finally {
-        http.end();
     }
+    http.end();  // Moved outside try-catch to ensure cleanup
+    return false;
 }
 
 // Hue Bridge Authentication
@@ -306,9 +306,9 @@ bool authenticateHueBridge() {
     } catch (const std::exception& e) {
         Serial.println("Error in Hue authentication: " + String(e.what()));
         return false;
-    } finally {
-        http.end();
     }
+    http.end();  // Moved outside try-catch to ensure cleanup
+    return false;
 }
 
 // Hue API Endpoints
