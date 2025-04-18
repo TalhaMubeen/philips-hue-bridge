@@ -98,7 +98,6 @@ void handleButton() {
     bool rawButtonState = digitalRead(BUTTON_PIN);
     Serial.println("Raw button state on pin " + String(BUTTON_PIN) + ": " + String(rawButtonState));
 
-    // Check if the pin is stuck (always HIGH or LOW)
     static unsigned long lastChangeTime = 0;
     static bool lastLoggedState = rawButtonState;
     if (rawButtonState != lastLoggedState) {
@@ -148,141 +147,168 @@ void handleButton() {
 
 // mDNS Discovery for Hue Bridge
 bool discoverHueBridgeViaMDNS() {
-    Serial.println("Starting mDNS discovery for Hue Bridge...");
-    if (!MDNS.begin("xiao-hue")) {
-        Serial.println("Error setting up mDNS responder!");
+    try {
+        Serial.println("Starting mDNS discovery for Hue Bridge...");
+        if (!MDNS.begin("xiao-hue")) {
+            Serial.println("Error setting up mDNS responder!");
+            return false;
+        }
+
+        // Try _hue._tcp first
+        Serial.println("Querying for _hue._tcp...");
+        int n = MDNS.queryService("hue", "tcp");
+        if (n > 0) {
+            for (int i = 0; i < n; ++i) {
+                String name = MDNS.hostname(i);
+                IPAddress ip = MDNS.IP(i);  // Corrected to use MDNS.IP(i)
+                String ipStr = ip.toString();
+                Serial.println("Found Hue Bridge: " + name + " at IP: " + ipStr);
+                String bridgeid = MDNS.txt(i, "bridgeid");
+                String modelid = MDNS.txt(i, "modelid");
+                Serial.println("Bridge ID: " + bridgeid + ", Model ID: " + modelid);
+                if (name.startsWith("Philips Hue")) {
+                    hueBridgeIP = ipStr;
+                    Serial.println("Selected Hue Bridge IP: " + hueBridgeIP);
+                    strncpy(settings.hueBridgeIP, hueBridgeIP.c_str(), HUE_MAX_BRIDGE_IP_LENGTH);
+                    saveSettings();
+                    return true;
+                }
+            }
+        } else {
+            Serial.println("No Hue Bridges found via _hue._tcp");
+        }
+
+        // Fall back to _huesync._tcp
+        Serial.println("Querying for _huesync._tcp...");
+        n = MDNS.queryService("huesync", "tcp");
+        if (n > 0) {
+            for (int i = 0; i < n; ++i) {
+                String name = MDNS.hostname(i);
+                IPAddress ip = MDNS.IP(i);  // Corrected to use MDNS.IP(i)
+                String ipStr = ip.toString();
+                Serial.println("Found HueSync device: " + name + " at IP: " + ipStr);
+                String devicetype = MDNS.txt(i, "devicetype");
+                String uniqueid = MDNS.txt(i, "uniqueid");
+                Serial.println("Device Type: " + devicetype + ", Unique ID: " + uniqueid);
+                if (devicetype.indexOf("bridge") >= 0 || name.startsWith("Philips Hue")) {
+                    hueBridgeIP = ipStr;
+                    Serial.println("Selected Hue Bridge IP via _huesync: " + hueBridgeIP);
+                    strncpy(settings.hueBridgeIP, hueBridgeIP.c_str(), HUE_MAX_BRIDGE_IP_LENGTH);
+                    saveSettings();
+                    return true;
+                }
+            }
+        } else {
+            Serial.println("No HueSync devices found via _huesync._tcp");
+        }
+
+        Serial.println("No matching Hue Bridge found via mDNS");
+        return false;
+    } catch (const std::exception& e) {
+        Serial.println("Error in mDNS discovery: " + String(e.what()));
         return false;
     }
-
-    // Try _hue._tcp first
-    Serial.println("Querying for _hue._tcp...");
-    int n = MDNS.queryService("hue", "tcp");
-    if (n > 0) {
-        for (int i = 0; i < n; ++i) {
-            String name = MDNS.hostname(i);
-            String ip = MDNS.IP(i).toString();
-            Serial.println("Found Hue Bridge: " + name + " at IP: " + ip);
-            String bridgeid = MDNS.txt(i, "bridgeid");
-            String modelid = MDNS.txt(i, "modelid");
-            Serial.println("Bridge ID: " + bridgeid + ", Model ID: " + modelid);
-            if (name.startsWith("Philips Hue")) {
-                hueBridgeIP = ip;
-                Serial.println("Selected Hue Bridge IP: " + hueBridgeIP);
-                strncpy(settings.hueBridgeIP, hueBridgeIP.c_str(), HUE_MAX_BRIDGE_IP_LENGTH);
-                saveSettings();
-                return true;
-            }
-        }
-    } else {
-        Serial.println("No Hue Bridges found via _hue._tcp");
-    }
-
-    // Fall back to _huesync._tcp
-    Serial.println("Querying for _huesync._tcp...");
-    n = MDNS.queryService("huesync", "tcp");
-    if (n > 0) {
-        for (int i = 0; i < n; ++i) {
-            String name = MDNS.hostname(i);
-            String ip = MDNS.IP(i).toString();
-            Serial.println("Found HueSync device: " + name + " at IP: " + ip);
-            String devicetype = MDNS.txt(i, "devicetype");
-            String uniqueid = MDNS.txt(i, "uniqueid");
-            Serial.println("Device Type: " + devicetype + ", Unique ID: " + uniqueid);
-            // Check if this is a Hue Bridge (devicetype might indicate a bridge)
-            if (devicetype.indexOf("bridge") >= 0 || name.startsWith("Philips Hue")) {
-                hueBridgeIP = ip;
-                Serial.println("Selected Hue Bridge IP via _huesync: " + hueBridgeIP);
-                strncpy(settings.hueBridgeIP, hueBridgeIP.c_str(), HUE_MAX_BRIDGE_IP_LENGTH);
-                saveSettings();
-                return true;
-            }
-        }
-    } else {
-        Serial.println("No HueSync devices found via _huesync._tcp");
-    }
-
-    Serial.println("No matching Hue Bridge found via mDNS");
-    return false;
 }
 
 // Cloud Discovery for Hue Bridge
 bool discoverHueBridgeViaCloud() {
-    Serial.println("Attempting Hue Bridge discovery via Cloud...");
-    http.begin(HUE_DISCOVERY_URL);
-    http.setTimeout(10000);
-    int httpCode = http.GET();
-    if (httpCode == HTTP_CODE_OK) {
-        String payload = http.getString();
-        Serial.println("Discovery response: " + payload);
-        DynamicJsonDocument doc(1024);
-        deserializeJson(doc, payload);
-        if (doc.size() > 0) {
-            hueBridgeIP = doc[0]["internalipaddress"].as<String>();
-            Serial.println("Discovered Hue Bridge IP: " + hueBridgeIP);
-            strncpy(settings.hueBridgeIP, hueBridgeIP.c_str(), HUE_MAX_BRIDGE_IP_LENGTH);
-            saveSettings();
-            return true;
+    try {
+        Serial.println("Attempting Hue Bridge discovery via Cloud...");
+        http.begin(HUE_DISCOVERY_URL);
+        http.setTimeout(10000);
+        int httpCode = http.GET();
+        if (httpCode == HTTP_CODE_OK) {
+            String payload = http.getString();
+            Serial.println("Discovery response: " + payload);
+            DynamicJsonDocument doc(1024);
+            DeserializationError error = deserializeJson(doc, payload);
+            if (error) {
+                Serial.println("JSON parsing failed: " + String(error.c_str()));
+                return false;
+            }
+            if (doc.size() > 0) {
+                hueBridgeIP = doc[0]["internalipaddress"].as<String>();
+                Serial.println("Discovered Hue Bridge IP: " + hueBridgeIP);
+                strncpy(settings.hueBridgeIP, hueBridgeIP.c_str(), HUE_MAX_BRIDGE_IP_LENGTH);
+                saveSettings();
+                return true;
+            } else {
+                Serial.println("No Hue Bridge found in discovery response");
+                return false;
+            }
         } else {
-            Serial.println("No Hue Bridge found in discovery response");
+            Serial.println("Hue discovery failed: " + String(httpCode));
             return false;
         }
-    } else {
-        Serial.println("Hue discovery failed: " + String(httpCode));
+    } catch (const std::exception& e) {
+        Serial.println("Error in cloud discovery: " + String(e.what()));
         return false;
+    } finally {
+        http.end();
     }
-    http.end();
 }
 
 // Hue Bridge Authentication
 bool authenticateHueBridge() {
-    if (hueBridgeIP == HUE_BRIDGE_IP || hueBridgeIP.length() == 0) {
-        if (discoverHueBridgeViaMDNS()) {
-            Serial.println("mDNS discovery successful, using IP: " + hueBridgeIP);
-        } else {
-            Serial.println("mDNS discovery failed, falling back to Cloud discovery...");
-            if (millis() - lastDiscoveryAttempt >= 900000) {
-                if (discoverHueBridgeViaCloud()) {
-                    lastDiscoveryAttempt = millis();
-                    Serial.println("Cloud discovery successful, using IP: " + hueBridgeIP);
+    try {
+        if (hueBridgeIP == HUE_BRIDGE_IP || hueBridgeIP.length() == 0) {
+            if (discoverHueBridgeViaMDNS()) {
+                Serial.println("mDNS discovery successful, using IP: " + hueBridgeIP);
+            } else {
+                Serial.println("mDNS discovery failed, falling back to Cloud discovery...");
+                if (millis() - lastDiscoveryAttempt >= 900000) {
+                    if (discoverHueBridgeViaCloud()) {
+                        lastDiscoveryAttempt = millis();
+                        Serial.println("Cloud discovery successful, using IP: " + hueBridgeIP);
+                    } else {
+                        Serial.println("Cloud discovery failed");
+                        return false;
+                    }
                 } else {
-                    Serial.println("Cloud discovery failed");
+                    Serial.println("Cloud discovery skipped due to rate limit");
                     return false;
                 }
-            } else {
-                Serial.println("Cloud discovery skipped due to rate limit");
+            }
+        }
+
+        Serial.println("Attempting authentication with Hue Bridge at: " + hueBridgeIP);
+        String url = "http://" + hueBridgeIP + "/api";
+        String payload = "{\"devicetype\":\"" + String(HUE_DEVICE_TYPE) + "\"}";
+        Serial.println("POST URL: " + url);
+        Serial.println("POST Payload: " + payload);
+        http.begin(url);
+        http.setTimeout(10000);
+        http.addHeader("Content-Type", "application/json");
+        int httpCode = http.POST(payload);
+        if (httpCode == HTTP_CODE_OK) {
+            String response = http.getString();
+            Serial.println("Auth response: " + response);
+            DynamicJsonDocument doc(1024);
+            DeserializationError error = deserializeJson(doc, response);
+            if (error) {
+                Serial.println("JSON parsing failed: " + String(error.c_str()));
                 return false;
             }
-        }
-    }
-
-    Serial.println("Attempting authentication with Hue Bridge at: " + hueBridgeIP);
-    String url = "http://" + hueBridgeIP + "/api";
-    String payload = "{\"devicetype\":\"" + String(HUE_DEVICE_TYPE) + "\"}";
-    Serial.println("POST URL: " + url);
-    Serial.println("POST Payload: " + payload);
-    http.begin(url);
-    http.setTimeout(10000);
-    http.addHeader("Content-Type", "application/json");
-    int httpCode = http.POST(payload);
-    if (httpCode == HTTP_CODE_OK) {
-        String response = http.getString();
-        Serial.println("Auth response: " + response);
-        DynamicJsonDocument doc(1024);
-        deserializeJson(doc, response);
-        if (doc[0]["success"]) {
-            hueUsername = doc[0]["success"]["username"].as<String>();
-            isHueAuthenticated = true;
-            Serial.println("Hue authenticated with username: " + hueUsername);
-            return true;
-        } else {
-            Serial.println("Auth response contains no success field");
-            if (doc[0]["error"]["type"].as<int>() == 101) {
-                Serial.println("Link button not pressed on Hue Bridge. Please press the link button and try again.");
+            if (doc[0]["success"]) {
+                hueUsername = doc[0]["success"]["username"].as<String>();
+                isHueAuthenticated = true;
+                Serial.println("Hue authenticated with username: " + hueUsername);
+                return true;
+            } else {
+                Serial.println("Auth response contains no success field");
+                if (doc[0]["error"]["type"].as<int>() == 101) {
+                    Serial.println("Link button not pressed on Hue Bridge. Please press the link button and try again.");
+                }
             }
         }
+        Serial.println("Hue auth failed: " + String(httpCode));
+        return false;
+    } catch (const std::exception& e) {
+        Serial.println("Error in Hue authentication: " + String(e.what()));
+        return false;
+    } finally {
+        http.end();
     }
-    Serial.println("Hue auth failed: " + String(httpCode));
-    return false;
 }
 
 // Hue API Endpoints
@@ -426,36 +452,41 @@ void setup() {
 void loop() {
     unsigned long currentMillis = millis();
 
-    if (!WiFi.isConnected()) {
-        indicateError();
-        setupWiFi();
-        Serial.println("WiFi disconnected, attempting reconnect");
-    }
-    if (!isHueAuthenticated) {
-        indicateError();
-        Serial.println("Hue not authenticated");
-        if (currentMillis - lastDiscoveryAttempt >= 60000) {
-            if (authenticateHueBridge()) {
-                Serial.println("Hue authentication successful after retry");
-            }
-            lastDiscoveryAttempt = currentMillis;
+    try {
+        if (!WiFi.isConnected()) {
+            indicateError();
+            setupWiFi();
+            Serial.println("WiFi disconnected, attempting reconnect");
         }
-    }
+        if (!isHueAuthenticated) {
+            indicateError();
+            Serial.println("Hue not authenticated");
+            if (currentMillis - lastDiscoveryAttempt >= 60000) {
+                if (authenticateHueBridge()) {
+                    Serial.println("Hue authentication successful after retry");
+                }
+                lastDiscoveryAttempt = currentMillis;
+            }
+        }
 
-    checkBattery();
-    handleButton();
+        checkBattery();
+        handleButton();
 
-    if (currentMillis - lastPatternUpdate >= PATTERN_UPDATE_INTERVAL) {
-        Serial.println("Pattern: " + String(currentPattern) + ", Brightness: " + String(currentBrightness) + ", On: " + String(settings.isOn));
-        if (settings.isOn) patterns[currentPattern]();
-        else fill_solid(leds, NUM_LEDS, CRGB::Black);
-        FastLED.show();
-        lastPatternUpdate = currentMillis;
-    }
+        if (currentMillis - lastPatternUpdate >= PATTERN_UPDATE_INTERVAL) {
+            Serial.println("Pattern: " + String(currentPattern) + ", Brightness: " + String(currentBrightness) + ", On: " + String(settings.isOn));
+            if (settings.isOn) patterns[currentPattern]();
+            else fill_solid(leds, NUM_LEDS, CRGB::Black);
+            FastLED.show();
+            lastPatternUpdate = currentMillis;
+        }
 
-    static unsigned long lastSave = 0;
-    if (currentMillis - lastSave >= SETTINGS_SAVE_INTERVAL) {
-        saveSettings();
-        lastSave = currentMillis;
+        static unsigned long lastSave = 0;
+        if (currentMillis - lastSave >= SETTINGS_SAVE_INTERVAL) {
+            saveSettings();
+            lastSave = currentMillis;
+        }
+    } catch (const std::exception& e) {
+        Serial.println("Error in loop: " + String(e.what()));
+        indicateError();
     }
 }
